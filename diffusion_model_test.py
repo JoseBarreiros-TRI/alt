@@ -746,7 +746,7 @@ def train_and_plot_all(shape_type):
     plt.tight_layout()
     cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
     cur_time_str += f"_{shape_type}_{shape_size}_layer_size_{hidden_size_simple}_{hidden_layers_simple}_{hidden_size_complex}_{hidden_layers_complex}_{num_epochs}epochs_data_size_{low_data_samples}_{high_data_samples}"
-    save_name_full = f"trajectories_grid_{cur_time_str}.png"
+    save_name_full = f"test_data/trajectories_grid_{cur_time_str}.png"
     fig.savefig(save_name_full, dpi=300)
     print(f"Saved full grid figure to '{save_name_full}'.")
     plt.close(fig)
