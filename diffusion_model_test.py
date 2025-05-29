@@ -7,10 +7,10 @@ import matplotlib.cm as cm
 import time
 from matplotlib.collections import LineCollection
 import multiprocessing
-multiprocessing.set_start_method('spawn', force=True) 
+multiprocessing.set_start_method('spawn', force=True)
 from sklearn.cluster import KMeans
 from scipy.interpolate import splprep, splev
-import sys  
+import sys
 import os
 import imageio
 from matplotlib.colors import to_rgb
@@ -21,9 +21,9 @@ import shutil
 
 
 # Configuration
-# shape_type = 'star'    
+# shape_type = 'star'
 shape_size = 2.0 # radius
-noise_scale_factor = 0.5 * shape_size # for both training and inference      
+noise_scale_factor = 0.5 * shape_size # for both training and inference
 # noise_scale = shape_size
 plot_limit = shape_size * 1.5
 
@@ -50,15 +50,15 @@ early_stopping_patience = num_epochs_small_data
 
 use_clustering = False
 num_clusters = 100
-num_timesteps = 100         
-hidden_size_simple = 24      
-hidden_layers_simple = 1    
-hidden_size_complex = 1024   
-hidden_layers_complex = 10    
+num_timesteps = 100
+hidden_size_simple = 24
+hidden_layers_simple = 1
+hidden_size_complex = 1024
+hidden_layers_complex = 10
 learning_rate_normal = 1e-3
 learning_rate_complex_small_data = 1e-4
 batch_size_low = 4096 #1024
-batch_size_high = 4096 #16384             
+batch_size_high = 4096 #16384
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # reset seed for reproducibility
@@ -79,7 +79,7 @@ def cluster_trajectories(trajectories, num_clusters=100):
         cluster_mask = (labels == c)
         cluster_members = final_points[cluster_mask]
         cluster_trajs = trajectories[cluster_mask]
-        
+
         # remove small clusters
         if len(cluster_members) < 10:
             continue
@@ -97,39 +97,39 @@ def cluster_trajectories(trajectories, num_clusters=100):
 # def sample_near_vertex_edges(vertices, n_samples, vertex_keep_prob=1.0, min_spread=0.1, max_spread=0.1):
 #     """
 #     Sample points near selected vertices along both sides (connected edges), no noise.
-    
+
 #     - Randomly drop some vertices (keep probability).
 #     - Use different spread distances for different vertices.
 #     """
 #     n_vertices = len(vertices)
-    
+
 #     # Randomly decide which vertices are kept
 #     keep_mask = np.random.rand(n_vertices) < vertex_keep_prob
 #     active_vertices = np.where(keep_mask)[0]
-    
+
 #     if len(active_vertices) == 0:
 #         raise ValueError("No active vertices! Try increasing vertex_keep_prob.")
-    
+
 #     # Assign random spread to each active vertex
 #     spreads = {v: np.random.uniform(min_spread, max_spread) for v in active_vertices}
 
 #     samples = []
-    
+
 #     for _ in range(n_samples):
 #         vidx = np.random.choice(active_vertices)  # pick an active vertex
 #         p0 = vertices[vidx]
 #         p_prev = vertices[(vidx - 1) % n_vertices]
 #         p_next = vertices[(vidx + 1) % n_vertices]
-        
+
 #         # Randomly choose one of the two connected edges
 #         p1 = p_prev if np.random.rand() < 0.5 else p_next
-        
+
 #         # Sample close to vertex based on its spread
 #         spread = spreads[vidx]
 #         t = np.random.uniform(0.0, spread)
 #         point = (1 - t) * p0 + t * p1
 #         samples.append(point)
-    
+
 #     return np.stack(samples, axis=0)
 
 def ellipse_func(t, size):
@@ -158,7 +158,7 @@ def sample_segments_along_curve(curve_func, size, n_segments, n_samples, segment
     # Randomly decide which segments to keep
     keep_mask = np.random.rand(n_segments) < keep_prob
     kept_t_starts = t_starts[keep_mask]
-    
+
     if len(kept_t_starts) == 0:
         raise ValueError("No segments kept! Try increasing keep_prob.")
 
@@ -207,7 +207,7 @@ def sample_shape_points(shape: str, size: float, n_samples: int, near_vertex_edg
             data = sample_segments_along_curve(ellipse_func, size, n_segments=20, n_samples=n_samples, segment_fraction=0.01, keep_prob=0.5)
         else:
             angles = np.random.rand(n_samples) * 2 * np.pi
-            long_axis = size 
+            long_axis = size
             short_axis = size * 0.5
             x = long_axis * np.cos(angles)
             y = short_axis * np.sin(angles)
@@ -218,7 +218,7 @@ def sample_shape_points(shape: str, size: float, n_samples: int, near_vertex_edg
         R = size
         r = 0.5 * size
         outer_angles = np.linspace(np.pi/2, 5*np.pi/2, 6)[:-1]
-        inner_angles = outer_angles + np.pi/5  
+        inner_angles = outer_angles + np.pi/5
         outer_pts = np.stack([R * np.cos(outer_angles), R * np.sin(outer_angles)], axis=1)
         inner_pts = np.stack([r * np.cos(inner_angles), r * np.sin(inner_angles)], axis=1)
         vertices = []
@@ -266,11 +266,11 @@ def sample_shape_points(shape: str, size: float, n_samples: int, near_vertex_edg
 
     else:
         raise ValueError(f"Unknown shape_type: {shape}")
-        
-    
+
+
     return data.astype(np.float32)
 # points_np = sample_shape_points(shape_type, shape_size, num_training_points)
-# points = torch.from_numpy(points_np).to(device)  
+# points = torch.from_numpy(points_np).to(device)
 
 # Model
 class DiffusionMLP(nn.Module):
@@ -284,7 +284,7 @@ class DiffusionMLP(nn.Module):
             layers.append(nn.ReLU())
         layers.append(nn.Linear(hidden_size, output_dim))
         self.net = nn.Sequential(*layers)
-    
+
     def forward(self, x):
         return self.net(x)
 
@@ -301,9 +301,9 @@ if print_num_params:
 
 # hyperparameters
 T = num_timesteps
-betas = torch.linspace(1e-4, 0.02, T).to(device)           
-alphas = 1 - betas                                        
-alpha_bars = torch.cumprod(alphas, dim=0)                 
+betas = torch.linspace(1e-4, 0.02, T).to(device)
+alphas = 1 - betas
+alpha_bars = torch.cumprod(alphas, dim=0)
 
 # Training
 # with early stopping and best model restoration
@@ -416,7 +416,7 @@ def plot_trajectories(trajectories, points_np, title=None, last_steps=30, ax=Non
         # only plot 1000 trajectories, sampled evenly
         step_size = max(1, num_trajectories // 1000)
         for i in range(0, num_trajectories, step_size):
-            
+
             traj = trajectories[i, -steps_to_plot::2, :]  # take last steps_to_plot steps, every 5th step
             x, y = traj[:, 0], traj[:, 1]
 
@@ -429,9 +429,9 @@ def plot_trajectories(trajectories, points_np, title=None, last_steps=30, ax=Non
             except Exception as e:
                 # fallback if spline fitting fails
                 ax.plot(x, y, color='cyan', alpha=0.15, linewidth=0.2, zorder=1)
-            
-        
-    
+
+
+
     # Plot
     start_points = trajectories[:, 0, :]
     end_points = trajectories[:, -1, :]
@@ -445,12 +445,12 @@ def plot_trajectories(trajectories, points_np, title=None, last_steps=30, ax=Non
                color='gray', edgecolors='gray', s=1, alpha=0.2, label="Input Points", zorder=3)
 
     # after denoising
-    ax.scatter(end_points[:, 0], end_points[:, 1], 
+    ax.scatter(end_points[:, 0], end_points[:, 1],
                color='blue', s=40, edgecolors='white', linewidths=0.5, zorder=10, alpha=0.25)
 
     # gound truth points
     marker_size_cur = 30 if points_np.shape[0] < high_data_samples else 7
-    ax.scatter(points_np[:, 0], points_np[:, 1], 
+    ax.scatter(points_np[:, 0], points_np[:, 1],
                c='orange', s=marker_size_cur, linewidths=0.1, alpha=1.0, zorder=100, label="Ground Truth")
 
     if title is not None:
@@ -461,12 +461,12 @@ def plot_trajectories(trajectories, points_np, title=None, last_steps=30, ax=Non
     ax.axis('off')
 
     # Fix the plot plot_limits based on shape size
-    
-    
+
+
     ax.set_xlim(-plot_limit, plot_limit)
     ax.set_ylim(-plot_limit, plot_limit)
 
-    
+
 # Before training
 all_losses = []
 all_labels = []
@@ -475,8 +475,8 @@ all_labels = []
 def train_and_plot_all(shape_type):
     fig, axs = plt.subplots(2, 2, figsize=(12, 12))
     axs = axs.flatten()
-    save_dir = f"{shape_type}"
-    
+    save_dir = f"test_data/{shape_type}"
+
     if os.path.exists(save_dir):
         print(f"[{shape_type.upper()}] Removing old folder: '{save_dir}'")
         shutil.rmtree(save_dir)
@@ -524,7 +524,7 @@ def train_and_plot_all(shape_type):
 
         traj = sample_points_with_trajectory(model, num_samples=num_inference_samples, initial_noise=shared_initial_noise)
         points_np = points_tensor.cpu().numpy()
-        
+
         if data_type == "small":
             data_size = low_data_samples
             title_name = f"{label} ({data_size} demos, {hidden_size}x{hidden_layers})"
@@ -603,7 +603,7 @@ def save_trajectory_video(trajectories, shape_type, save_path="diffusion.mp4", f
 
     gray_rgb = to_rgb("gray")
     blue_rgb = to_rgb("blue")
-    trail_color = (0.3, 0.3, 0.3)  
+    trail_color = (0.3, 0.3, 0.3)
     min_size = 1
     max_size = 40
     subset = min(num_samples, 300)
@@ -695,7 +695,7 @@ def save_trajectory_video(trajectories, shape_type, save_path="diffusion.mp4", f
     plt.close(fig)
     print(f"Saved diffusion video to: {save_path}")
 
-    
+
 if __name__ == "__main__":
     shapes = ['star', 'ellipse', 'heart', 'rectangle']
     processes = []
@@ -709,6 +709,6 @@ if __name__ == "__main__":
         p.join()
         if p.exitcode != 0:
             print(f"Process {p.pid} for shape '{shape}' exited with error code {p.exitcode}. Stopping program.")
-            sys.exit(1)  
+            sys.exit(1)
 
     print("All shapes finished successfully.")
