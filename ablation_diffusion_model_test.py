@@ -25,38 +25,17 @@ shape_size = 2.0  # radius
 noise_scale_factor = 0.5 * shape_size  # for both training and inference
 plot_limit = shape_size * 1.5
 
-# Low-data and high-data configurations
-low_data_samples = 20  # Few training samples
-high_data_samples = 100000  # Many training samples
-num_epochs_small_data = 1000
-num_epochs_big_data = 100
-small_data_repeat_factor = 1000  # same as increasing the number of epochs
-
 save_flow_video = True
 
-# # SMALL TEST CASE
-# low_data_samples = 20      # Few training samples
-# high_data_samples = 100    # Many training samples
-# num_epochs_small_data = 100
-# num_epochs_big_data = 10
-
-
-print_num_params = False
 
 num_inference_samples = 5000
-early_stopping_patience = num_epochs_small_data
+early_stopping_patience = 1000
 
 use_clustering = False
 num_clusters = 100
 num_timesteps = 100
-hidden_size_simple = 24
-hidden_layers_simple = 1
-hidden_size_complex = 1024
-hidden_layers_complex = 10
-learning_rate_normal = 1e-3
-learning_rate_complex_small_data = 1e-4
-batch_size_low = 4096  # 1024
-batch_size_high = 4096  # 16384
+
+batch_size_default = 4096  # 1024
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # reset seed for reproducibility
@@ -335,28 +314,6 @@ class DiffusionMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
-# Create simple and complex models
-simple_model = DiffusionMLP(
-    input_dim=3,
-    output_dim=2,
-    hidden_size=hidden_size_simple,
-    hidden_layers=hidden_layers_simple,
-).to(device)
-complex_model = DiffusionMLP(
-    input_dim=3,
-    output_dim=2,
-    hidden_size=hidden_size_complex,
-    hidden_layers=hidden_layers_complex,
-).to(device)
-
-# calculate and print the number of parameters
-if print_num_params:
-    num_params_simple = sum(p.numel() for p in simple_model.parameters())
-    num_params_complex = sum(p.numel() for p in complex_model.parameters())
-    print(f"Simple model parameters: {num_params_simple: .2f}")
-    print(f"Complex model parameters: {num_params_complex / 1e6:.2f}M")
-
 # hyperparameters
 T = num_timesteps
 betas = torch.linspace(1e-4, 0.02, T).to(device)
@@ -556,7 +513,7 @@ def plot_trajectories(
     )
 
     # gound truth points
-    marker_size_cur = 30 if points_np.shape[0] < high_data_samples else 7
+    marker_size_cur = 30 if points_np.shape[0] < 100000 else 7
     ax.scatter(
         points_np[:, 0],
         points_np[:, 1],
@@ -576,7 +533,6 @@ def plot_trajectories(
     ax.axis("off")
 
     # Fix the plot plot_limits based on shape size
-
     ax.set_xlim(-plot_limit, plot_limit)
     ax.set_ylim(-plot_limit, plot_limit)
 
@@ -587,9 +543,8 @@ all_labels = []
 
 
 def train_and_plot_all(shape_type):
-    fig, axs = plt.subplots(2, 2, figsize=(12, 12))
-    axs = axs.flatten()
-    save_dir = f"test_data/{shape_type}"
+
+    save_dir = f"test_data/ablation/{shape_type}"
 
     if os.path.exists(save_dir):
         print(f"[{shape_type.upper()}] Removing old folder: '{save_dir}'")
@@ -598,55 +553,63 @@ def train_and_plot_all(shape_type):
 
     all_losses = []
     all_labels = []
+    hidden_sizes = [
+        32,
+        32,
+        # 128,
+        # 256,
+        # 1024,
+        ]
+    hidden_layers = [
+        1,
+        1,
+        # 3,
+        # 5,
+        # 10,
+        ]
 
-    points_np_low = sample_shape_points(
-        shape_type, shape_size, low_data_samples, near_vertex_edges=False
-    )
-    points_np_high = sample_shape_points(
-        shape_type, shape_size, high_data_samples, near_vertex_edges=False
-    )
-
-    points_low = torch.from_numpy(points_np_low).to(device)
-    points_high = torch.from_numpy(points_np_high).to(device)
-
-    configs = [
-        (
-            points_low,
-            "Small Data + Simple Model",
-            hidden_size_simple,
-            hidden_layers_simple,
-            axs[0],
-            batch_size_low,
-            "small",
-        ),
-        (
-            points_high,
-            "Big Data + Simple Model",
-            hidden_size_simple,
-            hidden_layers_simple,
-            axs[1],
-            batch_size_high,
-            "big",
-        ),
-        (
-            points_low,
-            "Small Data + Complex Model",
-            hidden_size_complex,
-            hidden_layers_complex,
-            axs[2],
-            batch_size_low,
-            "small",
-        ),
-        (
-            points_high,
-            "Big Data + Complex Model",
-            hidden_size_complex,
-            hidden_layers_complex,
-            axs[3],
-            batch_size_high,
-            "big",
-        ),
+    data_configs = [
+        (1e-4, # learning_rate
+         1000, # data_repeat_factor
+         350, # num epochs
+         20, # num data points
+         ),
+        # (1e-4, # learning_rate
+        #  100, # data_repeat_factor
+        #  400, # num epochs
+        #  200,  # num data points
+        #  ),
+        # (1e-4, # learning_rate
+        #  10, # data_repeat_factor
+        #  500, # num epochs
+        #  2000, # num data points
+        #  ),
+        # (1e-4, # learning_rate
+        #  1, # data_repeat_factor
+        #  600, # num epochs
+        #  20000, # num data points
+        #  ),
     ]
+    configs = []
+    for learning_rate, data_repeat_factor, num_epochs, num_data_points in data_configs:
+        data_type = num_data_points
+        for hidden_size, hidden_layer in zip(hidden_sizes, hidden_layers):
+            points = torch.from_numpy(sample_shape_points(
+                shape_type, shape_size, num_data_points, near_vertex_edges=False)).to(device)
+            configs.append(
+                (
+                    points,
+                    hidden_size,
+                    hidden_layer,
+                    batch_size_default,
+                    data_type,
+                    learning_rate,
+                    data_repeat_factor,
+                    num_epochs
+                ))
+
+    fig, axs = plt.subplots(len(configs), 2, figsize=(12*len(configs), 12))
+    axs = axs.flatten()
 
     shared_initial_noise = noise_scale_factor * torch.randn(
         num_inference_samples, 2
@@ -655,33 +618,27 @@ def train_and_plot_all(shape_type):
 
     for idx, (
         points_tensor,
-        label,
         hidden_size,
-        hidden_layers,
-        ax,
+        hidden_layer,
         batch_size,
         data_type,
+        learning_rate,
+        data_repeat_factor,
+        num_epochs,
     ) in enumerate(configs):
-        if data_type == "small":
-            points_tensor = points_tensor.repeat((small_data_repeat_factor, 1))
-            num_epochs = num_epochs_small_data
-            learning_rate = (
-                learning_rate_complex_small_data
-                if hidden_size == hidden_size_complex
-                else learning_rate_normal
-            )
-        elif data_type == "big":
-            num_epochs = num_epochs_big_data
-            learning_rate = learning_rate_normal
-        else:
-            raise ValueError(f"Unknown data_type: {data_type}")
+        ax = axs[idx]
+        points_tensor = points_tensor.repeat((data_repeat_factor, 1))
+        num_epochs = num_epochs
 
         model = DiffusionMLP(
             input_dim=3,
             output_dim=2,
             hidden_size=hidden_size,
-            hidden_layers=hidden_layers,
+            hidden_layers=hidden_layer,
         ).to(device)
+        num_params = sum(p.numel() for p in model.parameters())
+        print(f"Model parameters: {num_params: .1f}")
+        label =  f"Data ({data_type}) + Model ({num_params})"
 
         losses = train_model(
             model,
@@ -701,19 +658,14 @@ def train_and_plot_all(shape_type):
         )
         points_np = points_tensor.cpu().numpy()
 
-        if data_type == "small":
-            data_size = low_data_samples
-            title_name = f"{label} ({data_size} demos, {hidden_size}x{hidden_layers})"
-        else:
-            data_size = high_data_samples
-            title_name = (
-                f"{label} ({data_size // 1000}k demos, {hidden_size}x{hidden_layers})"
-            )
+        data_size = num_data_points
+        title_name = f"{label} ({data_size} demos, {hidden_size}x{hidden_layers})"
+
         title_names.append(title_name)
 
         plot_trajectories(traj, points_np, title=title_name, last_steps=30, ax=ax)
-        ax.set_xlim(-plot_limit, plot_limit)
-        ax.set_ylim(-plot_limit, plot_limit)
+        # ax.set_xlim(-plot_limit, plot_limit)
+        # ax.set_ylim(-plot_limit, plot_limit)
 
         fig_single, ax_single = plt.subplots(figsize=(6, 6))
         plot_trajectories(traj, points_np, title=None, last_steps=30, ax=ax_single)
@@ -722,17 +674,17 @@ def train_and_plot_all(shape_type):
         ax_single.axis("equal")
         ax_single.axis("off")
 
-        model_type = "Simple" if hidden_size == hidden_size_simple else "Complex"
+        model_type = f"({num_params:.1f})"
         cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-        cur_time_str += f"_{shape_type}_{shape_size}_layer_size_{hidden_size_simple}_{hidden_layers_simple}_{hidden_size_complex}_{hidden_layers_complex}_{num_epochs}epochs_data_size_{low_data_samples}_{high_data_samples}"
-        save_name_single = f"shape_{shape_type}_Model_is_{model_type}_Data_is_{data_type.capitalize()}_{cur_time_str}.png"
-        fig_single.savefig(os.path.join(save_dir, save_name_single), dpi=300)
+        cur_time_str += f"_shape_size_{shape_size}"
+        save_name = f"shape_{shape_type}_Model_is_{model_type}_Data_is_{data_type}_epochs_{num_epochs}_hid_layer_size_{hidden_size}_num_hid_layers_{hidden_layer}_{cur_time_str}.png"
+        fig_single.savefig(os.path.join(save_dir, save_name), dpi=300)
         plt.close(fig_single)
-        print(f"Saved subplot {idx+1} to '{save_name_single}'.")
+        print(f"Saved subplot {idx+1} to '{save_name}'.")
 
         if save_flow_video:
             video_filename = os.path.join(
-                save_dir, f"video_{shape_type}_{label.replace(' ', '_')}.mp4"
+                save_dir, f"video_{save_name}.mp4"
             )
             save_trajectory_video(
                 traj,
@@ -743,8 +695,8 @@ def train_and_plot_all(shape_type):
 
     plt.tight_layout()
     cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-    cur_time_str += f"_{shape_type}_{shape_size}_layer_size_{hidden_size_simple}_{hidden_layers_simple}_{hidden_size_complex}_{hidden_layers_complex}_{num_epochs}epochs_data_size_{low_data_samples}_{high_data_samples}"
-    save_name_full = f"test_data/trajectories_grid_{cur_time_str}.png"
+    cur_time_str += f"_{shape_type}_shape_size_{shape_size}"
+    save_name_full = f"test_data/ablation/trajectories_grid_{cur_time_str}.png"
     fig.savefig(save_name_full, dpi=300)
     print(f"Saved full grid figure to '{save_name_full}'.")
     plt.close(fig)
@@ -798,7 +750,7 @@ def save_trajectory_video(
     min_size = 1
     max_size = 40
     subset = min(num_samples, 300)
-    marker_size_cur = 30 if ground_truth_points.shape[0] < high_data_samples else 7
+    marker_size_cur = 30 if ground_truth_points.shape[0] < 100000 else 7
 
     last_rendered_frame = None
 
@@ -888,7 +840,8 @@ def save_trajectory_video(
 
 
 if __name__ == "__main__":
-    shapes = ["star", "ellipse", "heart", "rectangle"]
+    # shapes = ["star", "ellipse", "heart", "rectangle"]
+    shapes = ["star"]
     processes = []
 
     for shape in shapes:

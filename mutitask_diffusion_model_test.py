@@ -41,8 +41,6 @@ save_flow_video = True
 # num_epochs_small_data = 100
 # num_epochs_big_data = 10
 
-print_num_params = False
-
 num_inference_samples = 5000
 early_stopping_patience = num_epochs_small_data
 
