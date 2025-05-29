@@ -15,16 +15,18 @@ from torchvision.models import resnet18, ResNet18_Weights
 # First, we convert the image to a PIL image
 # then resize it to 320x240 (note that the order of dimensions in PIL is (height, width) so we write (240,320))
 # finally we apply random horizontal flip, color jitter, and finally convert it to a tensor and normalize it.
-data_transforms = T.Compose([
-    T.ToPILImage(),
-    T.Resize((240, 320)),  # the resolution of the image input should be 320x240
-    # T.RandomHorizontalFlip(),
-    T.ColorJitter(0.2, 0.2, 0.2, 0.05),
-    T.RandomResizedCrop((240, 320), scale=(0.9, 1.0)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225])
-])
+data_transforms = T.Compose(
+    [
+        T.ToPILImage(),
+        T.Resize((240, 320)),  # the resolution of the image input should be 320x240
+        # T.RandomHorizontalFlip(),
+        T.ColorJitter(0.2, 0.2, 0.2, 0.05),
+        T.RandomResizedCrop((240, 320), scale=(0.9, 1.0)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
+
 
 # create different views of the image with random augmentations (different each time)
 class RobotArmDataset(Dataset):
@@ -38,10 +40,10 @@ class RobotArmDataset(Dataset):
         self.videos_dir = videos_dir
 
         # load low-dim data from zarr
-        zarr_root = zarr.open(zarr_path, mode='r')
-        self.robot_eef_pos = zarr_root['data/robot_eef_pos'][:]   # (N, 3)
-        self.robot_eef_quat = zarr_root['data/robot_eef_quat'][:]  # (N, 4)
-        self.episode_ends = zarr_root['meta/episode_ends'][:]      # (num_episode,)
+        zarr_root = zarr.open(zarr_path, mode="r")
+        self.robot_eef_pos = zarr_root["data/robot_eef_pos"][:]  # (N, 3)
+        self.robot_eef_quat = zarr_root["data/robot_eef_quat"][:]  # (N, 4)
+        self.episode_ends = zarr_root["meta/episode_ends"][:]  # (num_episode,)
 
         # according to episode_ends, we can get the boundaries of each episode
         self.episode_boundaries = []
@@ -60,7 +62,7 @@ class RobotArmDataset(Dataset):
             third_video_path = os.path.join(ep_dir, "3.mp4")
             hand_frames = self.load_video_frames(hand_video_path)
             third_frames = self.load_video_frames(third_video_path)
-            self.video_frames[ep] = {'hand': hand_frames, 'third': third_frames}
+            self.video_frames[ep] = {"hand": hand_frames, "third": third_frames}
 
     def load_video_frames(self, video_path):
         cap = cv2.VideoCapture(video_path)
@@ -89,12 +91,12 @@ class RobotArmDataset(Dataset):
                 break
 
         # according to the episode and local index, we can get the image data
-        hand_img = self.video_frames[ep]['hand'][local_idx]    # numpy array, H x W x 3
-        third_img = self.video_frames[ep]['third'][local_idx]
+        hand_img = self.video_frames[ep]["hand"][local_idx]  # numpy array, H x W x 3
+        third_img = self.video_frames[ep]["third"][local_idx]
 
         # get access the low-dim data
-        pos = self.robot_eef_pos[idx]   # (3,)
-        quat = self.robot_eef_quat[idx] # (4,)
+        pos = self.robot_eef_pos[idx]  # (3,)
+        quat = self.robot_eef_quat[idx]  # (4,)
         pose = np.concatenate([pos, quat], axis=0)  # (7,)
 
         # create different views of the image with random augmentations (different each time)
@@ -112,10 +114,11 @@ class RobotArmDataset(Dataset):
         pose_v2 = pose_tensor + noise2
 
         # define two views for contrastive learning
-        view1 = {'hand_img': hand_img_v1, 'third_img': third_img_v1, 'pose': pose_v1}
-        view2 = {'hand_img': hand_img_v2, 'third_img': third_img_v2, 'pose': pose_v2}
+        view1 = {"hand_img": hand_img_v1, "third_img": third_img_v1, "pose": pose_v1}
+        view2 = {"hand_img": hand_img_v2, "third_img": third_img_v2, "pose": pose_v2}
 
         return view1, view2
+
 
 # Define the encoder
 class ImageEncoder(nn.Module):
@@ -127,6 +130,7 @@ class ImageEncoder(nn.Module):
     def forward(self, x):
         return self.cnn(x)
 
+
 # class PoseEncoder(nn.Module):
 #     def __init__(self, embed_dim=32):
 #         super().__init__()
@@ -137,6 +141,7 @@ class ImageEncoder(nn.Module):
 #         )
 #     def forward(self, x):
 #         return self.mlp(x)
+
 
 class FusionEncoder(nn.Module):
     def __init__(self, img_embed=128, pose_embed=32, final_embed=128):
@@ -150,9 +155,7 @@ class FusionEncoder(nn.Module):
         #     nn.Linear(256, final_embed)
         # use hand_img + third_img
         self.fc = nn.Sequential(
-                nn.Linear(img_embed * 2, 256),
-                nn.ReLU(),
-                nn.Linear(256, final_embed)
+            nn.Linear(img_embed * 2, 256), nn.ReLU(), nn.Linear(256, final_embed)
         )
         # only third view is used
         # self.fc = nn.Sequential(
@@ -160,6 +163,7 @@ class FusionEncoder(nn.Module):
         #     nn.ReLU(),
         #     nn.Linear(256, final_embed)
         # )
+
     def forward(self, hand_img, third_img, pose):
         """
         we have three modes:
@@ -168,7 +172,7 @@ class FusionEncoder(nn.Module):
             3. third_img
         """
         # hand_img, third_img: [B, 3, H, W]，pose: [B, 7]
-        hand_feat = self.image_encoder(hand_img)   # [B, img_embed]
+        hand_feat = self.image_encoder(hand_img)  # [B, img_embed]
         third_feat = self.image_encoder(third_img)  # [B, img_embed]
         # pose_feat = self.pose_encoder(pose)          # [B, pose_embed]
         # fused = torch.cat([hand_feat, third_feat, pose_feat], dim=1)
@@ -179,10 +183,11 @@ class FusionEncoder(nn.Module):
         embedding = embedding / torch.norm(embedding, dim=1, keepdim=True)
         return embedding
 
+
 # contrastive loss
 # we use NTXentLoss
 class NTXentLoss(nn.Module):
-    def __init__(self, batch_size, temperature=0.5, device='cuda'):
+    def __init__(self, batch_size, temperature=0.5, device="cuda"):
         super().__init__()
         self.batch_size = batch_size
         self.temperature = temperature
@@ -217,20 +222,25 @@ class NTXentLoss(nn.Module):
         loss /= N
         return loss
 
+
 # Training the model
 # Hyperparameters
 batch_size = 32
-num_epochs = 40    # 40 as default
+num_epochs = 40  # 40 as default
 learning_rate = 1e-4
 temperature = 0.4  # 0.4 as default
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # data path of videos and zarr file
-zarr_path = 'rgb_training/replay_buffer.zarr'
-videos_dir = 'rgb_training/videos'
+zarr_path = "rgb_training/replay_buffer.zarr"
+videos_dir = "rgb_training/videos"
 
-dataset = RobotArmDataset(zarr_path=zarr_path, videos_dir=videos_dir, transform=data_transforms)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+dataset = RobotArmDataset(
+    zarr_path=zarr_path, videos_dir=videos_dir, transform=data_transforms
+)
+dataloader = DataLoader(
+    dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True
+)
 
 # initialize the model, optimizer and loss function
 model = FusionEncoder().to(device)
@@ -243,12 +253,12 @@ for epoch in range(num_epochs):
     for batch in dataloader:
         # each batch contains two views
         view1, view2 = batch
-        hand_img1 = view1['hand_img'].to(device)
-        third_img1 = view1['third_img'].to(device)
-        pose1 = view1['pose'].to(device)
-        hand_img2 = view2['hand_img'].to(device)
-        third_img2 = view2['third_img'].to(device)
-        pose2 = view2['pose'].to(device)
+        hand_img1 = view1["hand_img"].to(device)
+        third_img1 = view1["third_img"].to(device)
+        pose1 = view1["pose"].to(device)
+        hand_img2 = view2["hand_img"].to(device)
+        third_img2 = view2["third_img"].to(device)
+        pose2 = view2["pose"].to(device)
 
         # get two embeddings
         z1 = model(hand_img1, third_img1, pose1)  # [B, final_embed]

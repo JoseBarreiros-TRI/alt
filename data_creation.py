@@ -10,16 +10,17 @@ from torchvision.models import resnet18, ResNet18_Weights
 import torch.nn as nn
 
 # data preprocessing
-data_transforms = T.Compose([
-    T.ToPILImage(),
-    T.Resize((240, 320)),  # the resolution of the image input should be 320x240
-    # T.RandomHorizontalFlip(),
-    T.ColorJitter(0.2, 0.2, 0.2, 0.05),
-    T.RandomResizedCrop((240, 320), scale=(0.9, 1.0)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225])
-])
+data_transforms = T.Compose(
+    [
+        T.ToPILImage(),
+        T.Resize((240, 320)),  # the resolution of the image input should be 320x240
+        # T.RandomHorizontalFlip(),
+        T.ColorJitter(0.2, 0.2, 0.2, 0.05),
+        T.RandomResizedCrop((240, 320), scale=(0.9, 1.0)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
 
 
 # Same as the training script
@@ -34,11 +35,11 @@ class RobotArmDataset(Dataset):
         self.videos_dir = videos_dir
 
         # load zarr data
-        zarr_root = zarr.open(zarr_path, mode='r')
-        self.robot_eef_pos = zarr_root['data/robot_eef_pos'][:]  # (N, 3)
-        self.robot_eef_quat = zarr_root['data/robot_eef_quat'][:]  # (N, 4)
+        zarr_root = zarr.open(zarr_path, mode="r")
+        self.robot_eef_pos = zarr_root["data/robot_eef_pos"][:]  # (N, 3)
+        self.robot_eef_quat = zarr_root["data/robot_eef_quat"][:]  # (N, 4)
         # the end index of each episode - same as diffusion policy
-        self.episode_ends = zarr_root['meta/episode_ends'][:]
+        self.episode_ends = zarr_root["meta/episode_ends"][:]
 
         # access the episode boundaries to get the start and end index of each episode and the global index
         self.episode_boundaries = []
@@ -57,7 +58,7 @@ class RobotArmDataset(Dataset):
             third_video_path = os.path.join(ep_dir, "3.mp4")
             hand_frames = self.load_video_frames(hand_video_path)
             third_frames = self.load_video_frames(third_video_path)
-            self.video_frames[ep] = {'hand': hand_frames, 'third': third_frames}
+            self.video_frames[ep] = {"hand": hand_frames, "third": third_frames}
 
     def load_video_frames(self, video_path):
         cap = cv2.VideoCapture(video_path)
@@ -86,8 +87,8 @@ class RobotArmDataset(Dataset):
                 break
 
         # find the corresponding video frames by local index
-        hand_img = self.video_frames[ep]['hand'][local_idx]  # numpy array, H x W x 3
-        third_img = self.video_frames[ep]['third'][local_idx]
+        hand_img = self.video_frames[ep]["hand"][local_idx]  # numpy array, H x W x 3
+        third_img = self.video_frames[ep]["third"][local_idx]
 
         # get eef info from zarr
         pos = self.robot_eef_pos[idx]
@@ -100,7 +101,11 @@ class RobotArmDataset(Dataset):
         # for pose,
         pose_tensor = torch.tensor(pose, dtype=torch.float)
 
-        view1 = {'hand_img': hand_img_v1, 'third_img': third_img_v1, 'pose': pose_tensor}
+        view1 = {
+            "hand_img": hand_img_v1,
+            "third_img": third_img_v1,
+            "pose": pose_tensor,
+        }
         # return view1 only
         return view1, view1
 
@@ -119,11 +124,7 @@ class ImageEncoder(nn.Module):
 class PoseEncoder(nn.Module):
     def __init__(self, embed_dim=32):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(7, 64),
-            nn.ReLU(),
-            nn.Linear(64, embed_dim)
-        )
+        self.mlp = nn.Sequential(nn.Linear(7, 64), nn.ReLU(), nn.Linear(64, embed_dim))
 
     def forward(self, x):
         return self.mlp(x)
@@ -142,9 +143,7 @@ class FusionEncoder(nn.Module):
         # )
         # third_img + hand_img
         self.fc = nn.Sequential(
-            nn.Linear(img_embed * 2, 256),
-            nn.ReLU(),
-            nn.Linear(256, final_embed)
+            nn.Linear(img_embed * 2, 256), nn.ReLU(), nn.Linear(256, final_embed)
         )
         # third_img
         # self.fc = nn.Sequential(
@@ -176,19 +175,23 @@ class FusionEncoder(nn.Module):
 # build the trajectory database
 if __name__ == "__main__":
     # path to the zarr file and video frames
-    zarr_path = 'rgb_training/replay_buffer.zarr'
-    videos_dir = 'rgb_training/videos'
-    save_path = 'traj_database.pt'
+    zarr_path = "rgb_training/replay_buffer.zarr"
+    videos_dir = "rgb_training/videos"
+    save_path = "traj_database.pt"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load the trained model - MAKE SURE THE MODEL IS THE SAME AS THE TRAINING SCRIPT
     model = FusionEncoder().to(device)
-    model.load_state_dict(torch.load("fusion_encoder_contrastive.pth", map_location=device))
+    model.load_state_dict(
+        torch.load("fusion_encoder_contrastive.pth", map_location=device)
+    )
     model.eval()
 
     # load the dataset
-    dataset = RobotArmDataset(zarr_path=zarr_path, videos_dir=videos_dir, transform=data_transforms)
+    dataset = RobotArmDataset(
+        zarr_path=zarr_path, videos_dir=videos_dir, transform=data_transforms
+    )
 
     all_embeddings = []
     info_list = []
@@ -197,9 +200,9 @@ if __name__ == "__main__":
     for idx in range(len(dataset)):
         view1, _ = dataset[idx]  # only view1 is used to build the database
         # there are three information in view1
-        hand_img = view1['hand_img'].unsqueeze(0).to(device)
-        third_img = view1['third_img'].unsqueeze(0).to(device)
-        pose = view1['pose'].unsqueeze(0).to(device)
+        hand_img = view1["hand_img"].unsqueeze(0).to(device)
+        third_img = view1["third_img"].unsqueeze(0).to(device)
+        pose = view1["pose"].unsqueeze(0).to(device)
 
         with torch.no_grad():
             emb = model(hand_img, third_img, pose)
@@ -220,6 +223,6 @@ if __name__ == "__main__":
     embeddings_tensor = torch.stack(all_embeddings)
 
     # build the trajectory database, which is a dictionary containing the embeddings and the info list
-    traj_database = {'embeddings': embeddings_tensor, 'info': info_list}
+    traj_database = {"embeddings": embeddings_tensor, "info": info_list}
     torch.save(traj_database, save_path)
     print(f"traj_database is saved in {save_path}")

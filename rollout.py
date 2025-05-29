@@ -9,14 +9,14 @@ import zarr
 from torchvision.models import resnet18, ResNet18_Weights
 
 # preprocessing
-preprocess = T.Compose([
-    T.ToPILImage(),
-    T.Resize((240, 320)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225])
-])
-
+preprocess = T.Compose(
+    [
+        T.ToPILImage(),
+        T.Resize((240, 320)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
 
 
 # define the model - should be consistent with the training script
@@ -58,7 +58,7 @@ class FusionEncoder(nn.Module):
         self.fc = torch.nn.Sequential(
             torch.nn.Linear(img_embed * 2, 256),
             torch.nn.ReLU(),
-            torch.nn.Linear(256, final_embed)
+            torch.nn.Linear(256, final_embed),
         )
         # mode 3: third_img
         # self.fc = torch.nn.Sequential(
@@ -89,12 +89,12 @@ model.eval()
 
 # loading the trajectory database
 db = torch.load("traj_database.pt", map_location=device)
-db_embeddings = db['embeddings'].to(device)  # [N, final_embed]
-info_list = db['info']
+db_embeddings = db["embeddings"].to(device)  # [N, final_embed]
+info_list = db["info"]
 
 # loading the zarr file
 zarr_path = "rgb_training/replay_buffer.zarr"
-zarr_root = zarr.open(zarr_path, mode='r')
+zarr_root = zarr.open(zarr_path, mode="r")
 robot_eef_pos = zarr_root["data/robot_eef_pos"][:]
 robot_eef_quat = zarr_root["data/robot_eef_quat"][:]
 episode_ends = zarr_root["meta/episode_ends"][:]
@@ -175,7 +175,8 @@ def realtime_rollout(hand_img_cv, third_img_cv, pose_np):
     matched_episode, matched_local_idx = info_list[max_idx]
     global_idx = get_global_index(matched_episode, matched_local_idx)
     print(
-        f"matched episode: {matched_episode}, local frame: {matched_local_idx}, global frame: {global_idx}, sim: {max_sim.item():.3f}")
+        f"matched episode: {matched_episode}, local frame: {matched_local_idx}, global frame: {global_idx}, sim: {max_sim.item():.3f}"
+    )
 
     # output the future trajectory
     future_traj = get_future_trajectory(global_idx, t_steps)
@@ -184,7 +185,9 @@ def realtime_rollout(hand_img_cv, third_img_cv, pose_np):
 
 def get_poses():
     # from zarr find the episode starts
-    episode_starts = np.concatenate([[0], episode_ends[:-1] + 1], axis=0)  # (num_episode,)
+    episode_starts = np.concatenate(
+        [[0], episode_ends[:-1] + 1], axis=0
+    )  # (num_episode,)
     # get the low-dim data of the start frame of each episode
     start_poses = []
     for start_idx in episode_starts:
@@ -195,9 +198,11 @@ def get_poses():
     start_poses = np.stack(start_poses, axis=0)  # (num_episode, 7)
     return start_poses
 
+
 # test
 if __name__ == "__main__":
     import time
+
     pose_np = get_poses()
 
     ###############################
@@ -216,7 +221,9 @@ if __name__ == "__main__":
         third_img_cv = cv2.imread(third_img_path)
 
         time_start = time.time()
-        future_trajectory, matched_episode = realtime_rollout(hand_img_cv, third_img_cv, pose_np[idx])
+        future_trajectory, matched_episode = realtime_rollout(
+            hand_img_cv, third_img_cv, pose_np[idx]
+        )
         time_end = time.time()
         # print(f"Time taken for test {idx}: {time_end - time_start:.8f} seconds")
 
@@ -246,19 +253,21 @@ if __name__ == "__main__":
     # Out-of-Distribution (OoD) test
     ###############################
     # from rollout import realtime_rollout
-    total_cases = 8      # 31 for InD, 8 for OoD
+    total_cases = 8  # 31 for InD, 8 for OoD
     success_count = 0
     failed_cases = []
 
     for idx in range(total_cases):
-        hand_img_path = f"OoD_cases/hand{idx}.png"   #  InD -> OoD; jpg->png
-        third_img_path = f"OoD_cases/eye{idx}.png"   #
+        hand_img_path = f"OoD_cases/hand{idx}.png"  #  InD -> OoD; jpg->png
+        third_img_path = f"OoD_cases/eye{idx}.png"  #
 
         hand_img_cv = cv2.imread(hand_img_path)
         third_img_cv = cv2.imread(third_img_path)
 
         time_start = time.time()
-        future_trajectory, matched_episode = realtime_rollout(hand_img_cv, third_img_cv, pose_np[idx])
+        future_trajectory, matched_episode = realtime_rollout(
+            hand_img_cv, third_img_cv, pose_np[idx]
+        )
         time_end = time.time()
         # print(f"Time taken for test {idx}: {time_end - time_start:.8f} seconds")
 
@@ -283,4 +292,3 @@ if __name__ == "__main__":
         print("Failed cases details (test_index → matched_episode):")
         for test_idx, matched_ep in failed_cases:
             print(f"  Test {test_idx} → matched {matched_ep}")
-
