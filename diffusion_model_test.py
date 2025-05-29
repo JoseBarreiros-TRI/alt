@@ -876,8 +876,8 @@ def save_trajectory_video(
 
         # save frame
         fig.canvas.draw()
-        frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype="uint8")
-        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        frame = np.frombuffer(fig.canvas.tostring_argb(), dtype="uint8")
+        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (4,))
         frames.append(frame)
         last_rendered_frame = frame  # save last frame
 
