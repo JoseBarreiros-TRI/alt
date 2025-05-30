@@ -555,17 +555,15 @@ def train_and_plot_all(shape_type):
     all_labels = []
     hidden_sizes = [
         32,
-        32,
-        # 128,
-        # 256,
-        # 1024,
+        128,
+        256,
+        1024,
         ]
     hidden_layers = [
         1,
-        1,
-        # 3,
-        # 5,
-        # 10,
+        3,
+        5,
+        10,
         ]
 
     data_configs = [
@@ -574,25 +572,24 @@ def train_and_plot_all(shape_type):
          350, # num epochs
          20, # num data points
          ),
-        # (1e-4, # learning_rate
-        #  100, # data_repeat_factor
-        #  400, # num epochs
-        #  200,  # num data points
-        #  ),
-        # (1e-4, # learning_rate
-        #  10, # data_repeat_factor
-        #  500, # num epochs
-        #  2000, # num data points
-        #  ),
-        # (1e-4, # learning_rate
-        #  1, # data_repeat_factor
-        #  600, # num epochs
-        #  20000, # num data points
-        #  ),
+        (1e-4, # learning_rate
+         100, # data_repeat_factor
+         400, # num epochs
+         200,  # num data points
+         ),
+        (1e-4, # learning_rate
+         10, # data_repeat_factor
+         500, # num epochs
+         2000, # num data points
+         ),
+        (1e-4, # learning_rate
+         1, # data_repeat_factor
+         600, # num epochs
+         20000, # num data points
+         ),
     ]
     configs = []
     for learning_rate, data_repeat_factor, num_epochs, num_data_points in data_configs:
-        data_type = num_data_points
         for hidden_size, hidden_layer in zip(hidden_sizes, hidden_layers):
             points = torch.from_numpy(sample_shape_points(
                 shape_type, shape_size, num_data_points, near_vertex_edges=False)).to(device)
@@ -602,13 +599,15 @@ def train_and_plot_all(shape_type):
                     hidden_size,
                     hidden_layer,
                     batch_size_default,
-                    data_type,
+                    num_data_points,
                     learning_rate,
                     data_repeat_factor,
                     num_epochs
                 ))
-
-    fig, axs = plt.subplots(len(configs), 2, figsize=(12*len(configs), 12))
+    n_model_architectures = len(hidden_sizes)
+    fig, axs = plt.subplots(
+        int(len(configs)/n_model_architectures), n_model_architectures,
+        figsize=(4*n_model_architectures, 1.7*len(configs)))
     axs = axs.flatten()
 
     shared_initial_noise = noise_scale_factor * torch.randn(
@@ -621,14 +620,13 @@ def train_and_plot_all(shape_type):
         hidden_size,
         hidden_layer,
         batch_size,
-        data_type,
+        num_data_points,
         learning_rate,
         data_repeat_factor,
         num_epochs,
     ) in enumerate(configs):
         ax = axs[idx]
         points_tensor = points_tensor.repeat((data_repeat_factor, 1))
-        num_epochs = num_epochs
 
         model = DiffusionMLP(
             input_dim=3,
@@ -638,7 +636,7 @@ def train_and_plot_all(shape_type):
         ).to(device)
         num_params = sum(p.numel() for p in model.parameters())
         print(f"Model parameters: {num_params: .1f}")
-        label =  f"Data ({data_type}) + Model ({num_params})"
+        label =  f"Data({num_data_points}), Model({num_params})"
 
         losses = train_model(
             model,
@@ -659,13 +657,14 @@ def train_and_plot_all(shape_type):
         points_np = points_tensor.cpu().numpy()
 
         data_size = num_data_points
-        title_name = f"{label} ({data_size} demos, {hidden_size}x{hidden_layers})"
+        # title_name = f"{label}\n({hidden_size}x{hidden_layers}, {num_epochs} epochs)"
+        title_name = f"{label},\n{num_epochs} epochs"
 
         title_names.append(title_name)
 
         plot_trajectories(traj, points_np, title=title_name, last_steps=30, ax=ax)
-        # ax.set_xlim(-plot_limit, plot_limit)
-        # ax.set_ylim(-plot_limit, plot_limit)
+        ax.set_xlim(-plot_limit, plot_limit)
+        ax.set_ylim(-plot_limit, plot_limit)
 
         fig_single, ax_single = plt.subplots(figsize=(6, 6))
         plot_trajectories(traj, points_np, title=None, last_steps=30, ax=ax_single)
@@ -677,8 +676,8 @@ def train_and_plot_all(shape_type):
         model_type = f"({num_params:.1f})"
         cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
         cur_time_str += f"_shape_size_{shape_size}"
-        save_name = f"shape_{shape_type}_Model_is_{model_type}_Data_is_{data_type}_epochs_{num_epochs}_hid_layer_size_{hidden_size}_num_hid_layers_{hidden_layer}_{cur_time_str}.png"
-        fig_single.savefig(os.path.join(save_dir, save_name), dpi=300)
+        save_name = f"shape_{shape_type}_Model_is_{model_type}_Data_is_{num_data_points}_epochs_{num_epochs}_hid_layer_size_{hidden_size}_num_hid_layers_{hidden_layer}_{cur_time_str}.png"
+        fig_single.savefig(os.path.join(save_dir, save_name), dpi=300,  bbox_inches='tight')
         plt.close(fig_single)
         print(f"Saved subplot {idx+1} to '{save_name}'.")
 
@@ -697,7 +696,7 @@ def train_and_plot_all(shape_type):
     cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
     cur_time_str += f"_{shape_type}_shape_size_{shape_size}"
     save_name_full = f"test_data/ablation/trajectories_grid_{cur_time_str}.png"
-    fig.savefig(save_name_full, dpi=300)
+    fig.savefig(save_name_full, dpi=200)
     print(f"Saved full grid figure to '{save_name_full}'.")
     plt.close(fig)
 
