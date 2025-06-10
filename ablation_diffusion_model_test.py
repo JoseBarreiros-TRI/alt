@@ -829,7 +829,8 @@ def train_and_plot_all(
     shape_type: str,
     cur_time_str: str,
     experiment_name: str,
-    device: torch.device = DEVICE
+    device: torch.device = DEVICE,
+    output_dir: str = None,
 ) -> None:
     """
     Run training and evaluation for multiple model/data configurations on a given 2D shape.
@@ -855,7 +856,11 @@ def train_and_plot_all(
         f"\n========================\nTraining on shape: {shape_type}\n========================"
     )
     # Prepare saving directory
+
     save_dir = f"results/ablation/{shape_type}/{experiment_name}/{cur_time_str}"
+
+    if output_dir is not None:
+        save_dir = output_dir +f"/{save_dir}"
     if os.path.exists(save_dir):
         print(f"[{shape_type.upper()}] Removing old folder: '{save_dir}'")
         shutil.rmtree(save_dir)
@@ -1252,7 +1257,10 @@ if __name__ == "__main__":
                  "test",
                  "simple_same_data_increasing_steps"]
     )
-
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+    )
     args = parser.parse_args()
 
     shape = args.shape
@@ -1264,6 +1272,6 @@ if __name__ == "__main__":
     processes = []
     cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
 
-    train_and_plot_all(shape, cur_time_str, experiment_name)
+    train_and_plot_all(shape, cur_time_str, experiment_name, output_dir=args.output_dir)
 
     print("All shapes finished successfully.")
