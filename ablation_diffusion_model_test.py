@@ -1,3 +1,4 @@
+import argparse
 import math
 import numpy as np
 import torch
@@ -7,6 +8,7 @@ import matplotlib.cm as cm
 import time
 from matplotlib.collections import LineCollection
 import multiprocessing
+from scipy.spatial import cKDTree
 
 multiprocessing.set_start_method("spawn", force=True)
 from sklearn.cluster import KMeans
@@ -18,29 +20,242 @@ from matplotlib.colors import to_rgb
 
 from scipy.interpolate import splprep, splev
 import shutil
+from typing import Optional, List, Tuple
+import pandas as pd
 
 
 # Configuration
-shape_size = 2.0  # radius
-noise_scale_factor = 0.5 * shape_size  # for both training and inference
-plot_limit = shape_size * 1.5
+SHAPE_SIZE = 2.0  # radius
+NOISE_SCALE_FACTOR = 0.5 * SHAPE_SIZE  # for both training and inference
+PLOT_LIMIT = SHAPE_SIZE * 1.5
+SAVE_FLOW_VIDEO = True
 
-save_flow_video = True
+NUM_INFERENCE_SAMPLES = 5000
+EARLY_STOPPING_PATIENCE = np.inf  # number of "non improving" epochs to wait before early stopping. Use np.inf to disable early stopping.
+
+USE_CLUSTERING = False
+NUM_CLUSTERS = 100
+T_NUM_TIMESTEPS = 100
+
+BATCH_SIZE_DEFAULT = 4096  # 1024
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+SEED = 42
+EVAL_EVERY_N_EPOCHS = 10
+
+MODEL_CONFIGS = {
+    "all_models": [
+        (32, # hidden layer size
+        1,  # num of hidden layers
+        ),
+        (128,  # hidden layer size
+        3,  # num of hidden layers
+        ),
+        (256,  # hidden layer size
+        5,  # num of hidden layers
+        ),
+        (1024,  # hidden layer size
+        10,  # num of hidden layers
+        )
+    ],
+    "simple_models": [
+        (128,  # hidden layer size
+        3,  # num of hidden layers
+        ),
+        (256,  # hidden layer size
+        5,  # num of hidden layers
+        ),
+    ],
+    "test": [
+        (16, # hidden layer size
+        1,  # num of hidden layers
+        ),
+        (32,  # hidden layer size
+        2,  # num of hidden layers
+        ),
+    ],
+}
+
+DATA_CONFIGS = {
+    # same amount of data, increasing num of training steps
+    "test": [
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        2, # num epochs
+        2, # num data points
+        "test", # model config name
+        ),
+    ],
+    # same amount of data, increasing num of training steps
+    "same_data_increasing_steps": [
+        (1e-4, # learning_rate
+        100, # data_repeat_factor
+        100, # num epochs
+        20, # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        100, # data_repeat_factor
+        1000, # num epochs
+        20,  # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        100, # data_repeat_factor
+        10000, # num epochs
+        20, # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        100, # data_repeat_factor
+        100000, # num epochs
+        20, # num data points
+        "all_models", # model config name
+        ),
+    ],
+    # same amount of data, increasing num of training steps
+    "simple_same_data_increasing_steps": [
+        (1e-4, # learning_rate
+        100, # data_repeat_factor
+        1000, # num epochs
+        20,  # num data points
+        "simple_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        100, # data_repeat_factor
+        10000, # num epochs
+        20, # num data points
+        "simple_models", # model config name
+        ),
+    ],
+    # same amount of data, increasing num of training steps
+    "same_high_data_increasing_steps": [
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        1, # num epochs
+        200000, # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        10, # num epochs
+        200000,  # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        100, # num epochs
+        200000, # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        1000, # num epochs
+        200000, # num data points
+        "all_models", # model config name
+        ),
+    ],
+    # same number of steps, increasing amount of data
+    "increasing_data_same_steps": [
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        500, # num epochs
+        200, # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        500, # num epochs
+        2000, # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        100, # num epochs
+        20000,  # num data points
+        "all_models", # model config name
+        ),
+        (1e-4, # learning_rate
+        1, # data_repeat_factor
+        10, # num epochs
+        200000, # num data points
+        "all_models", # model config name
+        ),
+    ],
+}
 
 
-num_inference_samples = 5000
-early_stopping_patience = 1000
+def compute_grid_coverage_metrics(gen_points: np.ndarray, ref_points: np.ndarray, grid_size: int = 64, bounds: tuple = None):
+    """
+    Computes grid-based precision, recall, and F1 score between generated and reference 2D point sets.
 
-use_clustering = False
-num_clusters = 100
-num_timesteps = 100
+    Args:
+        gen_points (np.ndarray): Generated samples, shape (N, 2).
+        ref_points (np.ndarray): Ground truth/reference samples, shape (M, 2).
+        grid_size (int): Number of bins per axis (e.g., 64x64 grid).
+        bounds (tuple): Optional (xmin, xmax, ymin, ymax); if None, derived from both sets.
 
-batch_size_default = 4096  # 1024
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    Returns:
+        dict: {precision, recall, f1, intersection_bins, gen_bins, ref_bins}
+    """
+    if bounds is None:
+        all_points = np.vstack([gen_points, ref_points])
+        xmin, ymin = np.min(all_points, axis=0)
+        xmax, ymax = np.max(all_points, axis=0)
+    else:
+        xmin, xmax, ymin, ymax = bounds
 
-# reset seed for reproducibility
-np.random.seed(42)
+    x_edges = np.linspace(xmin, xmax, grid_size + 1)
+    y_edges = np.linspace(ymin, ymax, grid_size + 1)
 
+    def get_bin_indices(points):
+        x_idx = np.digitize(points[:, 0], x_edges) - 1
+        y_idx = np.digitize(points[:, 1], y_edges) - 1
+        x_idx = np.clip(x_idx, 0, grid_size - 1)
+        y_idx = np.clip(y_idx, 0, grid_size - 1)
+        return set(zip(x_idx, y_idx))
+
+    gen_bins = get_bin_indices(gen_points)
+    ref_bins = get_bin_indices(ref_points)
+    intersection = gen_bins & ref_bins
+
+    precision = len(intersection) / len(gen_bins) if gen_bins else 0.0
+    recall = len(intersection) / len(ref_bins) if ref_bins else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "intersection_bins": len(intersection),
+        "gen_bins": len(gen_bins),
+        "ref_bins": len(ref_bins),
+        "intersection_over_ref_bins": len(intersection)/len(ref_bins),
+    }
+
+
+def chamfer_distance_kdtree(set_a: np.ndarray, set_b: np.ndarray, tree_b: cKDTree) -> float:
+    """
+    Compute the symmetric Chamfer Distance between two point clouds using KDTree.
+
+    Args:
+        set_a (np.ndarray): Generated point cloud of shape (N, D)
+        set_b (np.ndarray): Reference point cloud (e.g., ground truth) of shape (M, D)
+        tree_b (cKDTree): KDTree for reference data
+
+    Returns:
+        float: Chamfer Distance
+    """
+    # Nearest neighbor from A to B
+    dists_a_to_b, _ = tree_b.query(set_a, k=1)
+
+    # Nearest neighbor from B to A
+    tree_a = cKDTree(set_a)
+    dists_b_to_a, _ = tree_a.query(set_b, k=1)
+
+    # Average squared distances in both directions
+    chamfer = np.mean(dists_a_to_b ** 2) + np.mean(dists_b_to_a ** 2)
+    return chamfer
 
 def cluster_trajectories(trajectories, num_clusters=100):
 
@@ -71,45 +286,6 @@ def cluster_trajectories(trajectories, num_clusters=100):
 
     selected_trajectories = trajectories[selected_indices]
     return selected_trajectories
-
-
-# def sample_near_vertex_edges(vertices, n_samples, vertex_keep_prob=1.0, min_spread=0.1, max_spread=0.1):
-#     """
-#     Sample points near selected vertices along both sides (connected edges), no noise.
-
-#     - Randomly drop some vertices (keep probability).
-#     - Use different spread distances for different vertices.
-#     """
-#     n_vertices = len(vertices)
-
-#     # Randomly decide which vertices are kept
-#     keep_mask = np.random.rand(n_vertices) < vertex_keep_prob
-#     active_vertices = np.where(keep_mask)[0]
-
-#     if len(active_vertices) == 0:
-#         raise ValueError("No active vertices! Try increasing vertex_keep_prob.")
-
-#     # Assign random spread to each active vertex
-#     spreads = {v: np.random.uniform(min_spread, max_spread) for v in active_vertices}
-
-#     samples = []
-
-#     for _ in range(n_samples):
-#         vidx = np.random.choice(active_vertices)  # pick an active vertex
-#         p0 = vertices[vidx]
-#         p_prev = vertices[(vidx - 1) % n_vertices]
-#         p_next = vertices[(vidx + 1) % n_vertices]
-
-#         # Randomly choose one of the two connected edges
-#         p1 = p_prev if np.random.rand() < 0.5 else p_next
-
-#         # Sample close to vertex based on its spread
-#         spread = spreads[vidx]
-#         t = np.random.uniform(0.0, spread)
-#         point = (1 - t) * p0 + t * p1
-#         samples.append(point)
-
-#     return np.stack(samples, axis=0)
 
 
 def ellipse_func(t, size):
@@ -288,10 +464,6 @@ def sample_shape_points(
     return data.astype(np.float32)
 
 
-# points_np = sample_shape_points(shape_type, shape_size, num_training_points)
-# points = torch.from_numpy(points_np).to(device)
-
-
 # Model
 class DiffusionMLP(nn.Module):
     def __init__(
@@ -314,25 +486,41 @@ class DiffusionMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-# hyperparameters
-T = num_timesteps
-betas = torch.linspace(1e-4, 0.02, T).to(device)
-alphas = 1 - betas
-alpha_bars = torch.cumprod(alphas, dim=0)
-
 
 # Training
 # with early stopping and best model restoration
 def train_model(
-    model,
-    points,
-    num_epochs,
-    learning_rate,
-    label=None,
-    patience=early_stopping_patience,
-    batch_size=None,
-    shape_type=None,
-):
+    model: torch.nn.Module,
+    points: torch.Tensor,
+    num_epochs: int,
+    learning_rate: float,
+    alpha_bars: torch.Tensor,
+    label: Optional[str] = None,
+    patience: int = 50,
+    batch_size: Optional[int] = None,
+    shape_type: Optional[str] = None,
+    device = DEVICE,
+) -> Tuple[List[float], int, List[float]]:
+    """
+    Trains a diffusion model using denoising score matching with cosine learning rate decay and early stopping.
+
+    Args:
+        model (torch.nn.Module): The neural network model to train.
+        points (torch.Tensor): The training data, shape (N, D).
+        num_epochs (int): Maximum number of training epochs.
+        learning_rate (float): Initial learning rate for the optimizer.
+        alpha_bars (torch.Tensor): Precomputed alpha_bar schedule of shape (T,).
+        label (Optional[str]): Descriptive label for logging (e.g. experiment name).
+        patience (int): Early stopping patience (in epochs without improvement).
+        batch_size (Optional[int]): Mini-batch size. Must be set.
+        shape_type (Optional[str]): Shape name (used for logging).
+
+    Returns:
+        Tuple[List[float], int, List[float]]:
+            - List of epoch losses
+            - Total number of learning steps taken
+            - Placeholder list for Chamfer distances per epoch (currently unused)
+    """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
@@ -341,10 +529,20 @@ def train_model(
     print(f"[{shape_type.upper()}] -> Starting training: {label}")
     model.train()
     epoch_losses = []
+    epoch_cds = []
+    epoch_precisions = []
+    epoch_recalls = []
+    epoch_f1s = []
+    log_epochs = []
 
     best_loss = float("inf")
     best_model_state = None
     epochs_no_improve = 0
+    num_learning_steps = 0
+
+    # for cd calculation
+    ref_points = points.cpu().numpy()
+    tree_b = cKDTree(ref_points)
 
     for epoch in range(1, num_epochs + 1):
         perm = torch.randperm(points.shape[0])
@@ -353,11 +551,11 @@ def train_model(
 
         for i in range(0, points_shuffled.size(0), batch_size):
             x0 = points_shuffled[i : i + batch_size]
-            t = torch.randint(low=1, high=T + 1, size=(x0.size(0),), device=device)
+            t = torch.randint(low=1, high=T_NUM_TIMESTEPS + 1, size=(x0.size(0),), device=device)
             alpha_bar_t = alpha_bars[t - 1].unsqueeze(1)
-            epsilon = noise_scale_factor * torch.randn_like(x0)
+            epsilon = NOISE_SCALE_FACTOR * torch.randn_like(x0)
             x_t = torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * epsilon
-            t_norm = (t - 1).unsqueeze(1).float() / (T - 1)
+            t_norm = (t - 1).unsqueeze(1).float() / (T_NUM_TIMESTEPS - 1)
             model_input = torch.cat([x_t, t_norm], dim=1)
             pred_epsilon = model(model_input)
             loss = loss_fn(pred_epsilon, epsilon)
@@ -366,18 +564,46 @@ def train_model(
             loss.backward()
             optimizer.step()
 
+            num_learning_steps += 1
             running_loss += loss.item() * x0.size(0)
 
         scheduler.step()  # Update learning rate
 
         epoch_loss = running_loss / points.shape[0]
-        epoch_losses.append(epoch_loss)
 
         # Optional: log learning rate
         current_lr = scheduler.get_last_lr()[0]
-        if epoch % 10 == 0 or epoch == 1:
+
+        if epoch % EVAL_EVERY_N_EPOCHS == 0 or epoch == 1:
+            # === Evaluate Metrics at end of epoch ===
+            NUM_EVAL_SAMPLES = 100
+            model.eval()
+            with torch.no_grad():
+                initial_noise = torch.randn((NUM_EVAL_SAMPLES, 2), device=device)  # sampling noise
+                trajectories = sample_points_with_trajectory(
+                    model=model,
+                    num_samples=NUM_EVAL_SAMPLES,
+                    initial_noise=initial_noise,
+                    alpha_bars=alpha_bars,
+                    device=device,
+                )
+                gen_points = trajectories[:, -1, :]  # final denoised outputs
+
+                # Calculate Chamfer distance
+                cd = chamfer_distance_kdtree(gen_points, ref_points, tree_b)
+                epoch_cds.append(cd)
+
+                # Calculate precision and recall
+                coverage_metrics = compute_grid_coverage_metrics(gen_points, ref_points)
+                epoch_f1s.append(coverage_metrics["f1"])
+                epoch_precisions.append(coverage_metrics["precision"])
+                epoch_recalls.append(coverage_metrics["recall"])
+                epoch_losses.append(epoch_loss)
+                log_epochs.append(epoch)
+            model.train()
+
             print(
-                f"[Shape: {shape_type}]: Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.6f}, LR: {current_lr:.6f}"
+                f"[Shape: {shape_type}]: Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.6f}, LR: {current_lr:.6f}, Chamfer Distance: {cd:.6f}"
             )
 
         if epoch_loss < best_loss:
@@ -402,16 +628,49 @@ def train_model(
         )
         sys.exit(1)
 
-    return epoch_losses
+    logs = {
+        "losses": epoch_losses,
+        "chamfer_distances": epoch_cds,
+        "f1s": epoch_f1s,
+        "precisions": epoch_precisions,
+        "recalls": epoch_recalls,
+        "epochs": log_epochs
+    }
+    return num_learning_steps, logs
 
 
-# sampling
-def sample_points_with_trajectory(model, num_samples, initial_noise):
+def sample_points_with_trajectory(
+    model: torch.nn.Module,
+    num_samples: int,
+    initial_noise: torch.Tensor,
+    alpha_bars: torch.Tensor,
+    num_denoising_timesteps: int = T_NUM_TIMESTEPS,
+    device=DEVICE,
+) -> np.ndarray:
+    """
+    Generate denoising trajectories from a diffusion model starting from initial noise.
+
+    This function performs the full reverse diffusion process by iteratively denoising
+    the samples using the given model, while tracking the trajectory of each sample.
+
+    Args:
+        model (torch.nn.Module): The diffusion model which predicts epsilon (noise).
+        num_samples (int): Number of samples to generate.
+        initial_noise (torch.Tensor): Tensor of shape (num_samples, 2) containing
+            the initial Gaussian noise from which to start denoising.
+        num_denoising_timesteps: number of denoising steps.
+        alpha_bars: Precomputed alpha_bar schedule of shape (T,).
+
+    Returns:
+        np.ndarray: An array of shape (num_samples, T + 1, 2) representing the full
+            denoising trajectories for each sample from t = T down to t = 0.
+            If clustering is enabled, returns clustered trajectories.
+    """
     x_t = initial_noise.to(device)
     trajectories = [x_t.cpu().numpy()]
-    for t in range(T, 0, -1):
+    for t in range(num_denoising_timesteps, 0, -1):
         t_cur = torch.full((num_samples,), t, device=device, dtype=torch.long)
-        t_norm = (t_cur - 1).unsqueeze(1).float() / (T - 1)
+        t_norm = (t_cur - 1).unsqueeze(1).float() / (num_denoising_timesteps - 1)
         model_input = torch.cat([x_t, t_norm], dim=1)
         with torch.no_grad():
             pred_epsilon = model(model_input)
@@ -433,8 +692,8 @@ def sample_points_with_trajectory(model, num_samples, initial_noise):
         trajectories.append(x_t.cpu().numpy())
     trajectories = np.stack(trajectories, axis=1)  # (num_samples, num_steps+1, 2)
 
-    if use_clustering:
-        clustered_trajectories = cluster_trajectories(trajectories, num_clusters=100)
+    if USE_CLUSTERING:
+        clustered_trajectories = cluster_trajectories(trajectories, num_clusters=NUM_CLUSTERS)
     else:
         clustered_trajectories = trajectories
     return clustered_trajectories
@@ -533,88 +792,89 @@ def plot_trajectories(
     ax.axis("off")
 
     # Fix the plot plot_limits based on shape size
-    ax.set_xlim(-plot_limit, plot_limit)
-    ax.set_ylim(-plot_limit, plot_limit)
+    ax.set_xlim(-PLOT_LIMIT, PLOT_LIMIT)
+    ax.set_ylim(-PLOT_LIMIT, PLOT_LIMIT)
 
 
-# Before training
-all_losses = []
-all_labels = []
+def train_and_plot_all(
+    shape_type: str,
+    cur_time_str: str,
+    experiment_name: str,
+    device: torch.device = DEVICE
+) -> None:
+    """
+    Run training and evaluation for multiple model/data configurations on a given 2D shape.
 
+    This function performs the full experimental pipeline:
+        - Loads a set of model and data configs for a given experiment
+        - Trains each model using a diffusion score-matching objective
+        - Evaluates generalization using Chamfer distance and precision/recall
+        - Plots results including trajectories, training curves, and evaluation metrics
+        - Optionally generates denoising videos
 
-def train_and_plot_all(shape_type):
+    Args:
+        shape_type (str): The name of the geometric shape (e.g. "star", "ellipse", etc.).
+        cur_time_str (str): Timestamp or version string used to isolate output directory.
+        experiment_name (str): Name of the ablation experiment (must match a key in DATA_CONFIGS).
+        device (torch.device): Torch device to run model training (e.g. 'cuda' or 'cpu').
 
-    save_dir = f"test_data/ablation/{shape_type}"
+    Returns:
+        None. Saves all plots, metrics, and optionally videos to disk under results/ablation/.
+    """
 
+    print(
+        f"\n========================\nTraining on shape: {shape_type}\n========================"
+    )
+    # Prepare saving directory
+    save_dir = f"results/ablation/{shape_type}/{experiment_name}/{cur_time_str}"
     if os.path.exists(save_dir):
         print(f"[{shape_type.upper()}] Removing old folder: '{save_dir}'")
         shutil.rmtree(save_dir)
     os.makedirs(save_dir, exist_ok=True)
+    print(f"------Saving results in {save_dir}")
 
-    all_losses = []
-    all_labels = []
-    hidden_sizes = [
-        32,
-        128,
-        256,
-        1024,
-        ]
-    hidden_layers = [
-        1,
-        3,
-        5,
-        10,
-        ]
-
-    data_configs = [
-        (1e-4, # learning_rate
-         1000, # data_repeat_factor
-         350, # num epochs
-         20, # num data points
-         ),
-        (1e-4, # learning_rate
-         100, # data_repeat_factor
-         400, # num epochs
-         200,  # num data points
-         ),
-        (1e-4, # learning_rate
-         10, # data_repeat_factor
-         500, # num epochs
-         2000, # num data points
-         ),
-        (1e-4, # learning_rate
-         1, # data_repeat_factor
-         600, # num epochs
-         20000, # num data points
-         ),
-    ]
+    # Generate the configs
+    experiment_configs = DATA_CONFIGS[experiment_name]
     configs = []
-    for learning_rate, data_repeat_factor, num_epochs, num_data_points in data_configs:
-        for hidden_size, hidden_layer in zip(hidden_sizes, hidden_layers):
+    for learning_rate, data_repeat_factor, num_epochs, num_data_points, model_config_name in experiment_configs:
+        model_configs = MODEL_CONFIGS[model_config_name]
+        for (hidden_size, hidden_layer) in model_configs:
             points = torch.from_numpy(sample_shape_points(
-                shape_type, shape_size, num_data_points, near_vertex_edges=False)).to(device)
+                shape_type, SHAPE_SIZE, num_data_points, near_vertex_edges=False)).to(device)
             configs.append(
                 (
                     points,
                     hidden_size,
                     hidden_layer,
-                    batch_size_default,
+                    BATCH_SIZE_DEFAULT,
                     num_data_points,
                     learning_rate,
                     data_repeat_factor,
                     num_epochs
                 ))
-    n_model_architectures = len(hidden_sizes)
+    # preempt grid plot axes
+    n_model_architectures = len(model_configs)
     fig, axs = plt.subplots(
         int(len(configs)/n_model_architectures), n_model_architectures,
         figsize=(4*n_model_architectures, 1.7*len(configs)))
     axs = axs.flatten()
 
-    shared_initial_noise = noise_scale_factor * torch.randn(
-        num_inference_samples, 2
+    # -----Run the ablation over all configs
+    all_losses = []
+    all_labels = []
+    all_cds = []
+    eval_results = []
+    # training hyperparameters
+    betas = torch.linspace(1e-4, 0.02, T_NUM_TIMESTEPS).to(device)
+    alphas = 1 - betas
+    alpha_bars = torch.cumprod(alphas, dim=0)
+    # use the same noise for all the models
+    shared_initial_noise = NOISE_SCALE_FACTOR * torch.randn(
+        NUM_INFERENCE_SAMPLES, 2
     ).to(device)
-    title_names = []
-
+    # Full distribution for eval
+    full_points = sample_shape_points(
+                shape_type, SHAPE_SIZE, 100000, near_vertex_edges=False)
     for idx, (
         points_tensor,
         hidden_size,
@@ -626,8 +886,9 @@ def train_and_plot_all(shape_type):
         num_epochs,
     ) in enumerate(configs):
         ax = axs[idx]
+        # Prepare the input data
         points_tensor = points_tensor.repeat((data_repeat_factor, 1))
-
+        # Prepare the model
         model = DiffusionMLP(
             input_dim=3,
             output_dim=2,
@@ -638,50 +899,104 @@ def train_and_plot_all(shape_type):
         print(f"Model parameters: {num_params: .1f}")
         label =  f"Data({num_data_points}), Model({num_params})"
 
-        losses = train_model(
+        # Training
+        num_learning_steps, logs = train_model(
             model,
             points_tensor,
             num_epochs,
             learning_rate,
+            alpha_bars,
             label=label,
-            patience=early_stopping_patience,
+            patience=EARLY_STOPPING_PATIENCE,
             batch_size=batch_size,
             shape_type=shape_type,
         )
+        losses = logs["losses"]
+        chamfer_distances = logs["chamfer_distances"]
+        f1s = logs["f1s"]
+        precisions= logs["precisions"]
+        recalls = logs["recalls"]
+        epochs = logs["epochs"]
+
+
         all_losses.append(losses)
+        all_cds.append(chamfer_distances)
         all_labels.append(label)
 
+        # Eval with access to the underlying data distribution
         traj = sample_points_with_trajectory(
-            model, num_samples=num_inference_samples, initial_noise=shared_initial_noise
+            model, alpha_bars=alpha_bars, num_samples=NUM_INFERENCE_SAMPLES, initial_noise=shared_initial_noise
         )
+        end_points = traj[:, -1, :]
+        eval_result = compute_grid_coverage_metrics(gen_points=end_points, ref_points=full_points, grid_size=128)
+        precision_ = eval_result["precision"]
+        recall_ = eval_result["recall"]
+        intersection_over_ref_bins_ = eval_result["intersection_over_ref_bins"]
+        print("Eval results:\n",eval_result)
+        eval_results.append(eval_result)
+
+        # --Plotting
         points_np = points_tensor.cpu().numpy()
-
-        data_size = num_data_points
-        # title_name = f"{label}\n({hidden_size}x{hidden_layers}, {num_epochs} epochs)"
-        title_name = f"{label},\n{num_epochs} epochs"
-
-        title_names.append(title_name)
-
+        # Plot trajectoy in grid plot
+        title_name = (
+            f"{label},\n{num_epochs} epochs, \n{num_learning_steps} steps, "
+            f"\n precision: {precision_:.2f}, recall: {recall_:.2f},\n "
+            f"I/R_bins: {intersection_over_ref_bins_:.2f}")
         plot_trajectories(traj, points_np, title=title_name, last_steps=30, ax=ax)
-        ax.set_xlim(-plot_limit, plot_limit)
-        ax.set_ylim(-plot_limit, plot_limit)
+        ax.set_xlim(-PLOT_LIMIT, PLOT_LIMIT)
+        ax.set_ylim(-PLOT_LIMIT, PLOT_LIMIT)
 
-        fig_single, ax_single = plt.subplots(figsize=(6, 6))
-        plot_trajectories(traj, points_np, title=None, last_steps=30, ax=ax_single)
-        ax_single.set_xlim(-plot_limit, plot_limit)
-        ax_single.set_ylim(-plot_limit, plot_limit)
-        ax_single.axis("equal")
-        ax_single.axis("off")
-
+        # Create a single figure for all metrics
+        fig_combined, axs_combined = plt.subplots(2, 3, figsize=(18, 10))
+        axs_combined = axs_combined.flatten()
+        # 1. Trajectories
+        plot_trajectories(traj, points_np, title=None, last_steps=30, ax=axs_combined[0])
+        axs_combined[0].set_xlim(-PLOT_LIMIT, PLOT_LIMIT)
+        axs_combined[0].set_ylim(-PLOT_LIMIT, PLOT_LIMIT)
+        axs_combined[0].axis("equal")
+        axs_combined[0].axis("off")
+        axs_combined[0].set_title("Sampled Trajectories")
+        # 2. MSE Loss
+        axs_combined[1].plot(losses, label=label, linewidth=2)
+        axs_combined[1].set_xlabel("Epoch")
+        axs_combined[1].set_ylabel("MSE Loss")
+        axs_combined[1].set_title("Training Loss")
+        # 3. Chamfer Distance
+        axs_combined[2].plot(chamfer_distances, label=label, linewidth=2)
+        axs_combined[2].set_xlabel("Epoch")
+        axs_combined[2].set_ylabel("Chamfer Distance")
+        axs_combined[2].set_title("Chamfer Distance")
+        # 4. Precision
+        axs_combined[3].plot(precisions, label=label, linewidth=2)
+        axs_combined[3].set_xlabel("Epoch")
+        axs_combined[3].set_ylabel("Precision")
+        axs_combined[3].set_title("Precision")
+        # 5. Recall
+        axs_combined[4].plot(recalls, label=label, linewidth=2)
+        axs_combined[4].set_xlabel("Epoch")
+        axs_combined[4].set_ylabel("Recall")
+        axs_combined[4].set_title("Recall")
+        # 6. F1 Score
+        axs_combined[5].plot(f1s, label=label, linewidth=2)
+        axs_combined[5].set_xlabel("Epoch")
+        axs_combined[5].set_ylabel("F1 Score")
+        axs_combined[5].set_title("F1 Score")
+        # Final formatting
+        for ax_ in axs_combined[1:]:
+            ax_.grid(True)
+            ax_.legend()
+        fig_combined.suptitle(title_name)
+        # Save figure
         model_type = f"({num_params:.1f})"
-        cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-        cur_time_str += f"_shape_size_{shape_size}"
-        save_name = f"shape_{shape_type}_Model_is_{model_type}_Data_is_{num_data_points}_epochs_{num_epochs}_hid_layer_size_{hidden_size}_num_hid_layers_{hidden_layer}_{cur_time_str}.png"
-        fig_single.savefig(os.path.join(save_dir, save_name), dpi=300,  bbox_inches='tight')
-        plt.close(fig_single)
-        print(f"Saved subplot {idx+1} to '{save_name}'.")
+        save_name = f"metrics_shape_{shape_type}_Model_is_{model_type}_Data_is_{num_data_points}_epochs_{num_epochs}_hid_layer_size_{hidden_size}_num_hid_layers_{hidden_layer}.png"
+        combined_path = os.path.join(save_dir, save_name)
+        plt.tight_layout()
+        fig_combined.savefig(combined_path, dpi=300)
+        plt.close(fig_combined)
+        print(f"Saved metrics figure to: {save_name}")
 
-        if save_flow_video:
+        # save denoising video
+        if SAVE_FLOW_VIDEO:
             video_filename = os.path.join(
                 save_dir, f"video_{save_name}.mp4"
             )
@@ -692,14 +1007,21 @@ def train_and_plot_all(shape_type):
                 ground_truth_points=points_np,
             )
 
+    # ---Save eval results
+    df = pd.DataFrame(eval_results)
+    # Save to pickle
+    output_path = f"{save_dir}/eval_metrics.pkl"  # You can change the path if needed
+    df.to_pickle(output_path)
+    print(f"Saved metrics to: {output_path}")
+
+    # ---Save combined plots
     plt.tight_layout()
-    cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-    cur_time_str += f"_{shape_type}_shape_size_{shape_size}"
-    save_name_full = f"test_data/ablation/trajectories_grid_{cur_time_str}.png"
+    save_name_full = f"{save_dir}/trajectories_grid.png"
     fig.savefig(save_name_full, dpi=200)
     print(f"Saved full grid figure to '{save_name_full}'.")
     plt.close(fig)
 
+    # Plot combined losses
     plt.figure(figsize=(8, 6))
     for losses, label in zip(all_losses, all_labels):
         plt.plot(losses, label=label)
@@ -708,18 +1030,24 @@ def train_and_plot_all(shape_type):
     plt.title("Training Loss Curves")
     plt.legend()
     plt.grid(True)
-
-    save_name_loss = f"loss_curves_{cur_time_str}.png"
+    save_name_loss = f"loss_curves.png"
     plt.savefig(os.path.join(save_dir, save_name_loss), dpi=300)
     plt.close()
     print(f"Saved loss curves figure to '{save_name_loss}'.")
 
-
-def train_and_plot_shape(shape):
-    print(
-        f"\n========================\nTraining on shape: {shape}\n========================"
-    )
-    train_and_plot_all(shape)
+    # Plot combined Chamfer Distances
+    plt.figure(figsize=(8, 6))
+    for cds, label in zip(all_cds, all_labels):
+        plt.plot(cds, label=label)
+    plt.xlabel("Epoch")
+    plt.ylabel("Chamfer Distance")
+    plt.title("Training CDs")
+    plt.legend()
+    plt.grid(True)
+    save_name_cds = f"cd_curves.png"
+    plt.savefig(os.path.join(save_dir, save_name_cds), dpi=300)
+    plt.close()
+    print(f"Saved CD curves figure to '{save_name_cds}'.")
 
 
 def interpolate_color(c1, c2, alpha):
@@ -755,8 +1083,8 @@ def save_trajectory_video(
 
     for t in range(1, num_steps):
         ax.clear()
-        ax.set_xlim(-plot_limit, plot_limit)
-        ax.set_ylim(-plot_limit, plot_limit)
+        ax.set_xlim(-PLOT_LIMIT, PLOT_LIMIT)
+        ax.set_ylim(-PLOT_LIMIT, PLOT_LIMIT)
         ax.axis("off")
         ax.set_title(
             f"{shape_type.upper()} Diffusion Step {t}/{num_steps - 1}", fontsize=14
@@ -839,21 +1167,39 @@ def save_trajectory_video(
 
 
 if __name__ == "__main__":
-    # shapes = ["star", "ellipse", "heart", "rectangle"]
-    shapes = ["star"]
+
+    parser = argparse.ArgumentParser(description="Train single task diffusion model on 2D shapes.")
+    parser.add_argument(
+        "--shape",
+        type=str,
+        default="star",
+        help="List of shapes to train on.",
+        choices=["star", "ellipse", "heart", "rectangle"]
+    )
+
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default="test",
+        help="Name of the experiment for logging/checkpointing purposes.",
+        choices=["increasing_data_same_steps",
+                 "same_data_increasing_steps",
+                 "same_high_data_increasing_steps",
+                 "test",
+                 "simple_same_data_increasing_steps"]
+    )
+
+    args = parser.parse_args()
+
+    shape = args.shape
+    experiment_name = args.experiment_name
+
+    # reset seed for reproducibility
+    np.random.seed(SEED)
+
     processes = []
+    cur_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
 
-    for shape in shapes:
-        p = multiprocessing.Process(target=train_and_plot_shape, args=(shape,))
-        p.start()
-        processes.append(p)
-
-    for p, shape in zip(processes, shapes):
-        p.join()
-        if p.exitcode != 0:
-            print(
-                f"Process {p.pid} for shape '{shape}' exited with error code {p.exitcode}. Stopping program."
-            )
-            sys.exit(1)
+    train_and_plot_all(shape, cur_time_str, experiment_name)
 
     print("All shapes finished successfully.")
