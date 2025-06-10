@@ -42,6 +42,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 SEED = 42
 EVAL_EVERY_N_EPOCHS = 10
+N_VAL_POINTS = 1000
 
 MODEL_CONFIGS = {
     "all_models": [
@@ -62,9 +63,9 @@ MODEL_CONFIGS = {
         (128,  # hidden layer size
         3,  # num of hidden layers
         ),
-        (256,  # hidden layer size
-        5,  # num of hidden layers
-        ),
+        (1024,  # hidden layer size
+        10,  # num of hidden layers
+        )
     ],
     "test": [
         (16, # hidden layer size
@@ -500,6 +501,7 @@ def train_model(
     batch_size: Optional[int] = None,
     shape_type: Optional[str] = None,
     device = DEVICE,
+    val_points: torch.Tensor = None,
 ) -> Tuple[List[float], int, List[float]]:
     """
     Trains a diffusion model using denoising score matching with cosine learning rate decay and early stopping.
@@ -514,12 +516,11 @@ def train_model(
         patience (int): Early stopping patience (in epochs without improvement).
         batch_size (Optional[int]): Mini-batch size. Must be set.
         shape_type (Optional[str]): Shape name (used for logging).
+        val_points (Optional [torch.Tensor]): Validation points (N_val, D).
 
     Returns:
-        Tuple[List[float], int, List[float]]:
-            - List of epoch losses
-            - Total number of learning steps taken
-            - Placeholder list for Chamfer distances per epoch (currently unused)
+        num_learning_steps: Number of updates.
+        logs: Dict with metrics across training.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -529,6 +530,7 @@ def train_model(
     print(f"[{shape_type.upper()}] -> Starting training: {label}")
     model.train()
     epoch_losses = []
+    epoch_val_losses = []
     epoch_cds = []
     epoch_precisions = []
     epoch_recalls = []
@@ -545,6 +547,7 @@ def train_model(
     tree_b = cKDTree(ref_points)
 
     for epoch in range(1, num_epochs + 1):
+        model.train()
         perm = torch.randperm(points.shape[0])
         points_shuffled = points[perm]
         running_loss = 0.0
@@ -574,11 +577,34 @@ def train_model(
         # Optional: log learning rate
         current_lr = scheduler.get_last_lr()[0]
 
+        # === Evaluation Block ===
         if epoch % EVAL_EVERY_N_EPOCHS == 0 or epoch == 1:
             # === Evaluate Metrics at end of epoch ===
             NUM_EVAL_SAMPLES = 100
             model.eval()
             with torch.no_grad():
+                if val_points is not None:
+                    # Validation Loss
+                    val_loss = 0.0
+                    val_perm = torch.randperm(val_points.shape[0])
+                    val_shuffled = val_points[val_perm]
+
+                    for i in range(0, val_shuffled.size(0), batch_size):
+                        x0 = val_shuffled[i : i + batch_size]
+                        t = torch.randint(1, T_NUM_TIMESTEPS + 1, (x0.size(0),), device=device)
+                        alpha_bar_t = alpha_bars[t - 1].unsqueeze(1)
+                        epsilon = NOISE_SCALE_FACTOR * torch.randn_like(x0)
+                        x_t = torch.sqrt(alpha_bar_t) * x0 + torch.sqrt(1 - alpha_bar_t) * epsilon
+                        t_norm = (t - 1).unsqueeze(1).float() / (T_NUM_TIMESTEPS - 1)
+                        model_input = torch.cat([x_t, t_norm], dim=1)
+
+                        pred_epsilon = model(model_input)
+                        val_loss += loss_fn(pred_epsilon, epsilon).item() * x0.size(0)
+
+                    val_loss /= val_points.shape[0]
+                    epoch_val_losses.append(val_loss)
+
+                # Chamfer, Precision, Recall
                 initial_noise = torch.randn((NUM_EVAL_SAMPLES, 2), device=device)  # sampling noise
                 trajectories = sample_points_with_trajectory(
                     model=model,
@@ -600,12 +626,12 @@ def train_model(
                 epoch_recalls.append(coverage_metrics["recall"])
                 epoch_losses.append(epoch_loss)
                 log_epochs.append(epoch)
-            model.train()
+            log_msg = f"[Shape: {shape_type}]: Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.6f}, LR: {current_lr:.6f}, Chamfer Distance: {cd:.6f}"
+            if val_points is not None:
+                log_msg += f", Val Loss: {val_loss:.4f}"
+            print(log_msg)
 
-            print(
-                f"[Shape: {shape_type}]: Epoch [{epoch}/{num_epochs}], Loss: {epoch_loss:.6f}, LR: {current_lr:.6f}, Chamfer Distance: {cd:.6f}"
-            )
-
+        # === Early Stopping ===
         if epoch_loss < best_loss:
             best_loss = epoch_loss
             best_model_state = model.state_dict()
@@ -619,6 +645,7 @@ def train_model(
             )
             break
 
+    # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
         print(f"[Shape: {shape_type}]: Restored best model with loss {best_loss:.6f}")
@@ -629,13 +656,15 @@ def train_model(
         sys.exit(1)
 
     logs = {
-        "losses": epoch_losses,
+        "training_losses": epoch_losses,
         "chamfer_distances": epoch_cds,
         "f1s": epoch_f1s,
         "precisions": epoch_precisions,
         "recalls": epoch_recalls,
         "epochs": log_epochs
     }
+    if val_points is not None:
+        logs["val_losses"] = epoch_val_losses
     return num_learning_steps, logs
 
 
@@ -786,7 +815,7 @@ def plot_trajectories(
 
     if title is not None:
         ax.set_title(title, fontsize=16)
-        ax.legend(loc="upper right", fontsize=12)
+    ax.legend(loc="upper right", fontsize=12)
 
     ax.axis("equal")
     ax.axis("off")
@@ -852,15 +881,22 @@ def train_and_plot_all(
                     data_repeat_factor,
                     num_epochs
                 ))
-    # preempt grid plot axes
+    # --- preempt grid plot axes
     n_model_architectures = len(model_configs)
+    # trajectories grid
     fig, axs = plt.subplots(
         int(len(configs)/n_model_architectures), n_model_architectures,
         figsize=(4*n_model_architectures, 1.7*len(configs)))
     axs = axs.flatten()
+    # precision and recall grid
+    fig_pr, axs_pr = plt.subplots(
+        int(len(configs)/n_model_architectures), n_model_architectures,
+        figsize=(4*n_model_architectures, 1.7*len(configs)))
+    axs_pr = axs_pr.flatten()
 
     # -----Run the ablation over all configs
     all_losses = []
+    all_val_losses = []
     all_labels = []
     all_cds = []
     eval_results = []
@@ -875,6 +911,9 @@ def train_and_plot_all(
     # Full distribution for eval
     full_points = sample_shape_points(
                 shape_type, SHAPE_SIZE, 100000, near_vertex_edges=False)
+    val_points = full_points[np.random.choice(full_points.shape[0], N_VAL_POINTS, replace=False)]
+    val_points_tensor = torch.from_numpy(val_points).to(device)
+
     for idx, (
         points_tensor,
         hidden_size,
@@ -885,7 +924,7 @@ def train_and_plot_all(
         data_repeat_factor,
         num_epochs,
     ) in enumerate(configs):
-        ax = axs[idx]
+
         # Prepare the input data
         points_tensor = points_tensor.repeat((data_repeat_factor, 1))
         # Prepare the model
@@ -910,16 +949,18 @@ def train_and_plot_all(
             patience=EARLY_STOPPING_PATIENCE,
             batch_size=batch_size,
             shape_type=shape_type,
+            val_points=val_points_tensor,
         )
-        losses = logs["losses"]
+        losses = logs["training_losses"]
+        val_losses = logs["val_losses"]
         chamfer_distances = logs["chamfer_distances"]
         f1s = logs["f1s"]
         precisions= logs["precisions"]
         recalls = logs["recalls"]
         epochs = logs["epochs"]
 
-
         all_losses.append(losses)
+        all_val_losses.append(val_losses)
         all_cds.append(chamfer_distances)
         all_labels.append(label)
 
@@ -937,7 +978,8 @@ def train_and_plot_all(
 
         # --Plotting
         points_np = points_tensor.cpu().numpy()
-        # Plot trajectoy in grid plot
+        # Plot trajectory in grid plot
+        ax = axs[idx]
         title_name = (
             f"{label},\n{num_epochs} epochs, \n{num_learning_steps} steps, "
             f"\n precision: {precision_:.2f}, recall: {recall_:.2f},\n "
@@ -945,6 +987,15 @@ def train_and_plot_all(
         plot_trajectories(traj, points_np, title=title_name, last_steps=30, ax=ax)
         ax.set_xlim(-PLOT_LIMIT, PLOT_LIMIT)
         ax.set_ylim(-PLOT_LIMIT, PLOT_LIMIT)
+        # Plot precision in grid plot
+        ax_pr = axs_pr[idx]
+        ax_pr.plot(epochs, precisions, label="precision", linewidth=2)
+        ax_pr.plot(epochs, recalls, label="recall", linewidth=2)
+        ax_pr.set_xlabel("Epoch")
+        ax_pr.set_ylabel("Precisions/Recall")
+        ax_pr.set_ylim(-0.01, 1.01)
+        ax_pr.set_title(title_name)
+        ax_pr.legend(loc="upper right", fontsize=12)
 
         # Create a single figure for all metrics
         fig_combined, axs_combined = plt.subplots(2, 3, figsize=(18, 10))
@@ -957,30 +1008,35 @@ def train_and_plot_all(
         axs_combined[0].axis("off")
         axs_combined[0].set_title("Sampled Trajectories")
         # 2. MSE Loss
-        axs_combined[1].plot(losses, label=label, linewidth=2)
+        axs_combined[1].plot(epochs, losses, label="training loss", linewidth=2)
+        axs_combined[1].plot(epochs, val_losses, label="val loss", linewidth=2)
         axs_combined[1].set_xlabel("Epoch")
         axs_combined[1].set_ylabel("MSE Loss")
         axs_combined[1].set_title("Training Loss")
         # 3. Chamfer Distance
-        axs_combined[2].plot(chamfer_distances, label=label, linewidth=2)
+        axs_combined[2].plot(epochs, chamfer_distances, label=label, linewidth=2)
         axs_combined[2].set_xlabel("Epoch")
         axs_combined[2].set_ylabel("Chamfer Distance")
         axs_combined[2].set_title("Chamfer Distance")
+        axs_combined[2].set_ylim(-0.01, 50)
         # 4. Precision
-        axs_combined[3].plot(precisions, label=label, linewidth=2)
+        axs_combined[3].plot(epochs, precisions, label=label, linewidth=2)
         axs_combined[3].set_xlabel("Epoch")
         axs_combined[3].set_ylabel("Precision")
         axs_combined[3].set_title("Precision")
+        axs_combined[3].set_ylim(-0.01, 1.01)
         # 5. Recall
-        axs_combined[4].plot(recalls, label=label, linewidth=2)
+        axs_combined[4].plot(epochs, recalls, label=label, linewidth=2)
         axs_combined[4].set_xlabel("Epoch")
         axs_combined[4].set_ylabel("Recall")
         axs_combined[4].set_title("Recall")
+        axs_combined[4].set_ylim(-0.01, 1.01)
         # 6. F1 Score
-        axs_combined[5].plot(f1s, label=label, linewidth=2)
+        axs_combined[5].plot(epochs, f1s, label=label, linewidth=2)
         axs_combined[5].set_xlabel("Epoch")
         axs_combined[5].set_ylabel("F1 Score")
         axs_combined[5].set_title("F1 Score")
+        axs_combined[5].set_ylim(-0.01, 1.01)
         # Final formatting
         for ax_ in axs_combined[1:]:
             ax_.grid(True)
@@ -1014,13 +1070,21 @@ def train_and_plot_all(
     df.to_pickle(output_path)
     print(f"Saved metrics to: {output_path}")
 
-    # ---Save combined plots
+    # ---Save grid plots
+    # save trajectories grid
     plt.tight_layout()
     save_name_full = f"{save_dir}/trajectories_grid.png"
     fig.savefig(save_name_full, dpi=200)
-    print(f"Saved full grid figure to '{save_name_full}'.")
+    print(f"Saved full traj grid figure to '{save_name_full}'.")
+    plt.close(fig)
+    # save precision and recall grid
+    plt.tight_layout()
+    save_name_full = f"{save_dir}/precision_recall_grid.png"
+    fig_pr.savefig(save_name_full, dpi=200)
+    print(f"Saved full P/R grid figure to '{save_name_full}'.")
     plt.close(fig)
 
+    # --- Combined plots
     # Plot combined losses
     plt.figure(figsize=(8, 6))
     for losses, label in zip(all_losses, all_labels):
