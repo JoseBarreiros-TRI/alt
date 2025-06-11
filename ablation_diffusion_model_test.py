@@ -9,6 +9,7 @@ import time
 from matplotlib.collections import LineCollection
 import multiprocessing
 from scipy.spatial import cKDTree
+import pickle
 
 multiprocessing.set_start_method("spawn", force=True)
 from sklearn.cluster import KMeans
@@ -905,6 +906,8 @@ def train_and_plot_all(
     all_labels = []
     all_cds = []
     eval_results = []
+    training_logs = []
+
     # training hyperparameters
     betas = torch.linspace(1e-4, 0.02, T_NUM_TIMESTEPS).to(device)
     alphas = 1 - betas
@@ -956,6 +959,7 @@ def train_and_plot_all(
             shape_type=shape_type,
             val_points=val_points_tensor,
         )
+        training_logs.append(logs)
         losses = logs["training_losses"]
         val_losses = logs["val_losses"]
         chamfer_distances = logs["chamfer_distances"]
@@ -975,6 +979,14 @@ def train_and_plot_all(
         )
         end_points = traj[:, -1, :]
         eval_result = compute_grid_coverage_metrics(gen_points=end_points, ref_points=full_points, grid_size=128)
+        eval_result["model_size"] = num_params
+        eval_result["data_size"] = num_data_points
+        eval_result["data_repeat_factor"] = data_repeat_factor
+        eval_result["num_epochs"] = num_epochs
+        eval_result["num_learning_steps"] = num_learning_steps
+        eval_result["hidden_size"] = hidden_size
+        eval_result["hidden_layer"] = hidden_layer
+
         precision_ = eval_result["precision"]
         recall_ = eval_result["recall"]
         intersection_over_ref_bins_ = eval_result["intersection_over_ref_bins"]
@@ -1074,6 +1086,10 @@ def train_and_plot_all(
     output_path = f"{save_dir}/eval_metrics.pkl"  # You can change the path if needed
     df.to_pickle(output_path)
     print(f"Saved metrics to: {output_path}")
+
+    # -- Save logs
+    with open(f"{save_dir}/training_logs.pkl", "wb") as f:
+        pickle.dump(training_logs, f)
 
     # ---Save grid plots
     # save trajectories grid
