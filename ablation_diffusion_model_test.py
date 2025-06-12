@@ -220,6 +220,7 @@ def compute_grid_coverage_metrics(gen_points: np.ndarray, ref_points: np.ndarray
     gen_bins = get_bin_indices(gen_points)
     ref_bins = get_bin_indices(ref_points)
     intersection = gen_bins & ref_bins
+    union = gen_bins | ref_bins
 
     precision = len(intersection) / len(gen_bins) if gen_bins else 0.0
     recall = len(intersection) / len(ref_bins) if ref_bins else 0.0
@@ -230,9 +231,10 @@ def compute_grid_coverage_metrics(gen_points: np.ndarray, ref_points: np.ndarray
         "recall": recall,
         "f1": f1,
         "intersection_bins": len(intersection),
+        "union_bins": len(union),
         "gen_bins": len(gen_bins),
         "ref_bins": len(ref_bins),
-        "intersection_over_ref_bins": len(intersection)/len(ref_bins),
+        "intersection_over_union": len(intersection)/len(union),
     }
 
 
@@ -978,7 +980,7 @@ def train_and_plot_all(
             model, alpha_bars=alpha_bars, num_samples=NUM_INFERENCE_SAMPLES, initial_noise=shared_initial_noise
         )
         end_points = traj[:, -1, :]
-        eval_result = compute_grid_coverage_metrics(gen_points=end_points, ref_points=full_points, grid_size=128)
+        eval_result = compute_grid_coverage_metrics(gen_points=end_points, ref_points=full_points, grid_size=200)
         eval_result["model_size"] = num_params
         eval_result["data_size"] = num_data_points
         eval_result["data_repeat_factor"] = data_repeat_factor
@@ -989,7 +991,7 @@ def train_and_plot_all(
 
         precision_ = eval_result["precision"]
         recall_ = eval_result["recall"]
-        intersection_over_ref_bins_ = eval_result["intersection_over_ref_bins"]
+        intersection_over_union_ = eval_result["intersection_over_union"]
         print("Eval results:\n",eval_result)
         eval_results.append(eval_result)
 
@@ -1000,7 +1002,7 @@ def train_and_plot_all(
         title_name = (
             f"{label},\n{num_epochs} epochs, \n{num_learning_steps} steps, "
             f"\n precision: {precision_:.2f}, recall: {recall_:.2f},\n "
-            f"I/R_bins: {intersection_over_ref_bins_:.2f}")
+            f"I/U_bins: {intersection_over_union_:.2f}")
         plot_trajectories(traj, points_np, title=title_name, last_steps=30, ax=ax)
         ax.set_xlim(-PLOT_LIMIT, PLOT_LIMIT)
         ax.set_ylim(-PLOT_LIMIT, PLOT_LIMIT)
